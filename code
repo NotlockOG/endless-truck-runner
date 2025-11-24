@@ -1,0 +1,784 @@
+import React, { useEffect, useRef, useState } from 'react';
+import * as THREE from 'three';
+
+const EndlessTruckGame = () => {
+  const mountRef = useRef(null);
+  const [score, setScore] = useState(0);
+  const [gameOver, setGameOver] = useState(false);
+  const [isStarted, setIsStarted] = useState(false);
+
+  useEffect(() => {
+    if (!mountRef.current) return;
+
+    // Scene setup
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x87CEEB);
+    scene.fog = new THREE.Fog(0x87CEEB, 80, 250);
+
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    mountRef.current.appendChild(renderer.domElement);
+
+    // Lighting
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+    scene.add(ambientLight);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+    dirLight.position.set(50, 100, 50);
+    dirLight.castShadow = true;
+    dirLight.shadow.camera.left = -80;
+    dirLight.shadow.camera.right = 80;
+    dirLight.shadow.camera.top = 80;
+    dirLight.shadow.camera.bottom = -80;
+    dirLight.shadow.mapSize.width = 2048;
+    dirLight.shadow.mapSize.height = 2048;
+    scene.add(dirLight);
+
+    // Ground
+    const groundGeom = new THREE.PlaneGeometry(200, 500);
+    const groundMat = new THREE.MeshStandardMaterial({ 
+      color: 0x8B4513,
+      roughness: 0.8
+    });
+    const ground = new THREE.Mesh(groundGeom, groundMat);
+    ground.rotation.x = -Math.PI / 2;
+    ground.position.y = -5;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    // Desert floor detail
+    const sandGeom = new THREE.PlaneGeometry(200, 500);
+    const sandMat = new THREE.MeshStandardMaterial({ 
+      color: 0xDEB887,
+      roughness: 1
+    });
+    const sand = new THREE.Mesh(sandGeom, sandMat);
+    sand.rotation.x = -Math.PI / 2;
+    sand.position.y = -4.9;
+    sand.receiveShadow = true;
+    scene.add(sand);
+
+    // Scenery objects
+    const sceneryObjects = [];
+    
+    function createCactus(x, z) {
+      const group = new THREE.Group();
+      
+      const trunkGeom = new THREE.CylinderGeometry(0.3, 0.4, 3, 8);
+      const cactusMat = new THREE.MeshStandardMaterial({ color: 0x2F4F2F });
+      const trunk = new THREE.Mesh(trunkGeom, cactusMat);
+      trunk.position.y = 1.5;
+      trunk.castShadow = true;
+      group.add(trunk);
+      
+      // Arms
+      const armGeom = new THREE.CylinderGeometry(0.2, 0.25, 1.5, 8);
+      const leftArm = new THREE.Mesh(armGeom, cactusMat);
+      leftArm.position.set(-0.5, 1.5, 0);
+      leftArm.rotation.z = Math.PI / 3;
+      leftArm.castShadow = true;
+      group.add(leftArm);
+      
+      const rightArm = new THREE.Mesh(armGeom, cactusMat);
+      rightArm.position.set(0.5, 2, 0);
+      rightArm.rotation.z = -Math.PI / 3;
+      rightArm.castShadow = true;
+      group.add(rightArm);
+      
+      group.position.set(x, -5, z);
+      return group;
+    }
+    
+    function createRock(x, z) {
+      const size = 0.5 + Math.random() * 1;
+      const rockGeom = new THREE.DodecahedronGeometry(size, 0);
+      const rockMat = new THREE.MeshStandardMaterial({ 
+        color: 0x696969,
+        roughness: 0.9
+      });
+      const rock = new THREE.Mesh(rockGeom, rockMat);
+      rock.position.set(x, -5 + size * 0.5, z);
+      rock.castShadow = true;
+      rock.rotation.set(Math.random(), Math.random(), Math.random());
+      return rock;
+    }
+    
+    function spawnScenery(z) {
+      for (let i = 0; i < 3; i++) {
+        const x = (Math.random() - 0.5) * 80 + (Math.random() > 0.5 ? 20 : -20);
+        const type = Math.random();
+        let obj;
+        
+        if (type > 0.6) {
+          obj = createCactus(x, z);
+        } else {
+          obj = createRock(x, z);
+        }
+        
+        scene.add(obj);
+        sceneryObjects.push({ mesh: obj, z: z });
+      }
+    }
+
+    // Initial scenery
+    for (let i = 0; i < 20; i++) {
+      spawnScenery(-i * 20 - 50);
+    }
+
+    // Player (invisible in first person)
+    const playerGeom = new THREE.BoxGeometry(1, 1.8, 1);
+    const playerMat = new THREE.MeshStandardMaterial({ 
+      color: 0xff4444,
+      transparent: true,
+      opacity: 0
+    });
+    const player = new THREE.Mesh(playerGeom, playerMat);
+    player.castShadow = true;
+    scene.add(player);
+
+    // Game state
+    const state = {
+      player: {
+        mesh: player,
+        velocity: new THREE.Vector3(0, 0, 0),
+        onGround: false,
+        position: new THREE.Vector3(0, 2, 0),
+        currentTruck: null
+      },
+      trucks: [],
+      score: 0,
+      highestZ: 0,
+      speed: 0,
+      targetSpeed: 2.0,
+      gameOver: false,
+      started: false,
+      keys: {},
+      spawnTimer: 0,
+      difficulty: 1,
+      lastSpawnZ: -20,
+      scenerySpawnZ: -50,
+      lanes: [-12, -6, 0, 6, 12]
+    };
+
+    // Truck class - styled like Clustertruck
+    class Truck {
+      constructor(z, lane, speed, movePattern) {
+        this.lane = lane;
+        this.speed = speed;
+        this.movePattern = movePattern;
+        this.time = Math.random() * Math.PI * 2;
+        this.baseX = state.lanes[lane];
+        
+        const truckGroup = new THREE.Group();
+        
+        // Main cargo container - bright colored like Clustertruck
+        const colors = [0xFF6B35, 0xF7931E, 0xFDC830, 0x37B1E5, 0x4ECDC4, 0xFF6B9D, 0x95E1D3];
+        const truckColor = colors[Math.floor(Math.random() * colors.length)];
+        
+        const containerGeom = new THREE.BoxGeometry(4.5, 2.5, 10);
+        const containerMat = new THREE.MeshStandardMaterial({ 
+          color: truckColor,
+          roughness: 0.6,
+          metalness: 0.2
+        });
+        const container = new THREE.Mesh(containerGeom, containerMat);
+        container.castShadow = true;
+        container.receiveShadow = true;
+        container.position.y = 2;
+        truckGroup.add(container);
+        
+        // Cargo top edge details
+        const edgeMat = new THREE.MeshStandardMaterial({ 
+          color: 0x333333,
+          roughness: 0.8
+        });
+        const edgeGeom = new THREE.BoxGeometry(4.6, 0.2, 10.1);
+        const topEdge = new THREE.Mesh(edgeGeom, edgeMat);
+        topEdge.position.y = 3.35;
+        topEdge.castShadow = true;
+        truckGroup.add(topEdge);
+        
+        // Cab - separate from cargo
+        const cabGeom = new THREE.BoxGeometry(3.8, 2.2, 3.5);
+        const cabMat = new THREE.MeshStandardMaterial({ 
+          color: new THREE.Color(truckColor).multiplyScalar(0.8),
+          roughness: 0.5,
+          metalness: 0.3
+        });
+        const cab = new THREE.Mesh(cabGeom, cabMat);
+        cab.position.set(0, 1.8, 6.8);
+        cab.castShadow = true;
+        truckGroup.add(cab);
+        
+        // Windshield
+        const windshieldGeom = new THREE.BoxGeometry(3.6, 1.5, 0.2);
+        const windshieldMat = new THREE.MeshStandardMaterial({ 
+          color: 0x444444,
+          roughness: 0.1,
+          metalness: 0.9,
+          transparent: true,
+          opacity: 0.6
+        });
+        const windshield = new THREE.Mesh(windshieldGeom, windshieldMat);
+        windshield.position.set(0, 2.2, 8.35);
+        windshield.rotation.x = -0.15;
+        truckGroup.add(windshield);
+        
+        // Roof details
+        const roofGeom = new THREE.BoxGeometry(3.8, 0.3, 3.5);
+        const roof = new THREE.Mesh(roofGeom, cabMat);
+        roof.position.set(0, 2.95, 6.8);
+        roof.castShadow = true;
+        truckGroup.add(roof);
+        
+        // Chassis/frame
+        const frameGeom = new THREE.BoxGeometry(3.5, 0.5, 14);
+        const frameMat = new THREE.MeshStandardMaterial({ color: 0x222222 });
+        const frame = new THREE.Mesh(frameGeom, frameMat);
+        frame.position.y = 0.5;
+        frame.castShadow = true;
+        truckGroup.add(frame);
+        
+        // Big wheels like Clustertruck
+        const wheelGeom = new THREE.CylinderGeometry(0.7, 0.7, 0.6, 20);
+        const wheelMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a });
+        const rimGeom = new THREE.CylinderGeometry(0.4, 0.4, 0.65, 20);
+        const rimMat = new THREE.MeshStandardMaterial({ 
+          color: 0x888888,
+          metalness: 0.6,
+          roughness: 0.3
+        });
+        
+        const wheelPositions = [
+          [-1.8, 0.7, 6.5],  // Front wheels
+          [1.8, 0.7, 6.5],
+          [-1.8, 0.7, -2],   // Middle wheels
+          [1.8, 0.7, -2],
+          [-1.8, 0.7, -4.5], // Back wheels
+          [1.8, 0.7, -4.5]
+        ];
+        
+        wheelPositions.forEach(pos => {
+          const wheel = new THREE.Mesh(wheelGeom, wheelMat);
+          wheel.rotation.z = Math.PI / 2;
+          wheel.position.set(...pos);
+          wheel.castShadow = true;
+          truckGroup.add(wheel);
+          
+          const rim = new THREE.Mesh(rimGeom, rimMat);
+          rim.rotation.z = Math.PI / 2;
+          rim.position.set(...pos);
+          truckGroup.add(rim);
+        });
+        
+        // Bumper
+        const bumperGeom = new THREE.BoxGeometry(4, 0.4, 0.5);
+        const bumper = new THREE.Mesh(bumperGeom, frameMat);
+        bumper.position.set(0, 1, 8.8);
+        bumper.castShadow = true;
+        truckGroup.add(bumper);
+        
+        truckGroup.position.set(this.baseX, -5, z);
+        scene.add(truckGroup);
+        
+        this.mesh = truckGroup;
+        this.topY = -1.75; // Top of container
+      }
+      
+      getTopSurface() {
+        return {
+          minX: this.mesh.position.x - 2.25,
+          maxX: this.mesh.position.x + 2.25,
+          minZ: this.mesh.position.z - 5,
+          maxZ: this.mesh.position.z + 5,
+          y: this.topY
+        };
+      }
+      
+      update(delta, globalSpeed) {
+        this.time += delta;
+        
+        // Limited movement patterns for playability
+        if (this.movePattern === 'sine') {
+          this.mesh.position.x = this.baseX + Math.sin(this.time * 1.5) * 2;
+        } else if (this.movePattern === 'sway') {
+          this.mesh.position.x = this.baseX + Math.sin(this.time * 2) * 1.5;
+        } else {
+          this.mesh.position.x = this.baseX;
+        }
+        
+        this.mesh.position.z += this.speed * globalSpeed;
+      }
+      
+      destroy() {
+        scene.remove(this.mesh);
+      }
+    }
+
+    // Spawn starting truck under player
+    function spawnStartingTruck() {
+      const truck = new Truck(0, 2, 0, 'static'); // Center lane, stationary
+      state.trucks.push(truck);
+    }
+
+    // Ensure there's always a reachable truck
+    function spawnTruck() {
+      const existingTrucks = state.trucks.filter(t => t.mesh.position.z < -10);
+      
+      let lane, pattern, zPos;
+      
+      if (existingTrucks.length > 0) {
+        // Find the furthest truck ahead
+        const lastTruck = existingTrucks[existingTrucks.length - 1];
+        const lastLane = state.lanes.indexOf(lastTruck.baseX);
+        
+        // Calculate maximum jump distance (considering physics)
+        const maxJumpDistance = 12; // Conservative max horizontal jump
+        const maxForwardDistance = 25; // Max forward distance with speed
+        
+        // Choose lane that's reachable from last truck
+        const reachableLanes = [];
+        for (let i = 0; i < state.lanes.length; i++) {
+          const lateralDistance = Math.abs(state.lanes[i] - lastTruck.baseX);
+          if (lateralDistance <= maxJumpDistance) {
+            reachableLanes.push(i);
+          }
+        }
+        
+        // If no lanes reachable, force adjacent lane
+        if (reachableLanes.length === 0) {
+          reachableLanes.push(lastLane);
+          if (lastLane > 0) reachableLanes.push(lastLane - 1);
+          if (lastLane < state.lanes.length - 1) reachableLanes.push(lastLane + 1);
+        }
+        
+        lane = reachableLanes[Math.floor(Math.random() * reachableLanes.length)];
+        
+        // Calculate safe spawn distance based on difficulty
+        const minDistance = 15;
+        const maxDistance = Math.min(maxForwardDistance, 20 + state.difficulty * 2);
+        const lateralDistance = Math.abs(state.lanes[lane] - lastTruck.baseX);
+        
+        // Further trucks need to be closer laterally
+        const distanceMultiplier = 1 - (lateralDistance / maxJumpDistance) * 0.3;
+        const spawnDistance = minDistance + Math.random() * (maxDistance - minDistance) * distanceMultiplier;
+        
+        // Less aggressive movement for reachability
+        pattern = lateralDistance > 6 ? 'static' : (Math.random() > 0.7 ? 'sway' : 'static');
+        
+        zPos = lastTruck.mesh.position.z - spawnDistance;
+      } else {
+        // First truck - center lane
+        lane = 2;
+        pattern = 'static';
+        zPos = state.lastSpawnZ - 18 - Math.random() * 5;
+      }
+      
+      const speed = 0.25 + Math.random() * 0.15 * Math.min(state.difficulty, 2);
+      
+      // Double-check for collision with existing trucks
+      for (let existingTruck of state.trucks) {
+        const distance = Math.abs(existingTruck.mesh.position.z - zPos);
+        const sameOrAdjacentLane = Math.abs(existingTruck.baseX - state.lanes[lane]) <= 6;
+        
+        if (sameOrAdjacentLane && distance < 16) {
+          zPos = existingTruck.mesh.position.z - 18;
+        }
+      }
+      
+      const truck = new Truck(zPos, lane, speed, pattern);
+      state.trucks.push(truck);
+      state.lastSpawnZ = zPos;
+    }
+
+    // Input handling
+    const onKeyDown = (e) => {
+      state.keys[e.code] = true;
+      
+      if (!state.started && e.code === 'Space') {
+        state.started = true;
+        setIsStarted(true);
+        // Spawn initial trucks ahead
+        for (let i = 0; i < 5; i++) {
+          spawnTruck();
+        }
+      }
+      
+      if (state.gameOver && e.code === 'KeyR') {
+        resetGame();
+      }
+      
+      if (e.code === 'Space' && state.player.onGround) {
+        state.player.velocity.y = 9;
+        state.player.onGround = false;
+      }
+    };
+    
+    const onKeyUp = (e) => {
+      state.keys[e.code] = false;
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+
+    // Reset game
+    function resetGame() {
+      state.trucks.forEach(t => t.destroy());
+      state.trucks = [];
+      state.player.position.set(0, 0.15, 0);
+      state.player.velocity.set(0, 0, 0);
+      state.score = 0;
+      state.highestZ = 0;
+      state.speed = 0;
+      state.targetSpeed = 3.0;
+      state.difficulty = 1;
+      state.gameOver = false;
+      state.started = false;
+      state.spawnTimer = 0;
+      state.lastSpawnZ = -20;
+      setScore(0);
+      setGameOver(false);
+      setIsStarted(false);
+      
+      // Spawn starting truck
+      spawnStartingTruck();
+    }
+
+    // Initialize with starting truck
+    spawnStartingTruck();
+    state.player.position.set(0, 0.15, 0); // Place player on top of starting truck
+
+    // Animation loop
+    const clock = new THREE.Clock();
+    let animationId;
+    
+    function animate() {
+      animationId = requestAnimationFrame(animate);
+      
+      const delta = Math.min(clock.getDelta(), 0.1);
+      
+      if (!state.started) {
+        // Menu camera - looking forward
+        camera.position.set(state.player.position.x, state.player.position.y + 0.6, state.player.position.z);
+        camera.lookAt(state.player.position.x, state.player.position.y + 0.6, state.player.position.z - 10);
+        renderer.render(scene, camera);
+        return;
+      }
+
+      // Smooth speed transition
+      state.speed += (state.targetSpeed - state.speed) * delta * 2;
+
+      // Player horizontal movement
+      const moveSpeed = state.player.onGround ? 17 : 9;
+      if (state.keys['KeyA'] || state.keys['ArrowLeft']) {
+        state.player.velocity.x = -moveSpeed;
+      } else if (state.keys['KeyD'] || state.keys['ArrowRight']) {
+        state.player.velocity.x = moveSpeed;
+      } else {
+        // Stronger deceleration for quicker stops
+        if (state.player.onGround) {
+          state.player.velocity.x *= 0.7;
+        } else {
+          state.player.velocity.x *= 0.9;
+        }
+      }
+
+      // Physics - gravity
+      state.player.velocity.y -= 25 * delta;
+      state.player.position.x += state.player.velocity.x * delta;
+      state.player.position.y += state.player.velocity.y * delta;
+
+      // Check truck collisions
+      state.player.onGround = false;
+      state.player.currentTruck = null;
+      
+      const playerFoot = state.player.position.y - 0.9;
+      const playerHead = state.player.position.y + 0.9;
+
+      for (let truck of state.trucks) {
+        const surface = truck.getTopSurface();
+        
+        // Check if player is above truck surface (landing on top)
+        if (state.player.position.x > surface.minX && 
+            state.player.position.x < surface.maxX &&
+            state.player.position.z > surface.minZ && 
+            state.player.position.z < surface.maxZ) {
+          
+          if (playerFoot <= surface.y + 0.3 && playerFoot >= surface.y - 0.5 && state.player.velocity.y <= 0) {
+            state.player.position.y = surface.y + 0.9;
+            state.player.velocity.y = 0;
+            state.player.onGround = true;
+            state.player.currentTruck = truck;
+            break;
+          }
+        }
+        
+        // Check for collision with truck body (prevent phasing through)
+        const truckBottom = -5;
+        const truckTop = surface.y;
+        
+        if (state.player.position.x > surface.minX && 
+            state.player.position.x < surface.maxX &&
+            state.player.position.z > surface.minZ && 
+            state.player.position.z < surface.maxZ) {
+          
+          // If player is inside truck body, push them out
+          if (playerFoot < truckTop && playerHead > truckBottom) {
+            // Push player to the side
+            const centerX = (surface.minX + surface.maxX) / 2;
+            const pushDirection = state.player.position.x > centerX ? 1 : -1;
+            state.player.position.x = pushDirection > 0 ? surface.maxX + 0.5 : surface.minX - 0.5;
+          }
+        }
+      }
+
+      // Inherit truck velocity
+      if (state.player.currentTruck) {
+        state.player.position.z += state.player.currentTruck.speed * state.speed;
+      }
+
+      // Check truck side climbing
+      for (let truck of state.trucks) {
+        const surface = truck.getTopSurface();
+        
+        // Check if player is at the side of the truck
+        const isAtSide = (
+          state.player.position.z > surface.minZ - 1 && 
+          state.player.position.z < surface.maxZ + 1 &&
+          state.player.position.y > -5 &&
+          state.player.position.y < surface.y + 1.5
+        );
+        
+        const isAtLeftSide = isAtSide && 
+          state.player.position.x > surface.minX - 2 && 
+          state.player.position.x < surface.minX + 1;
+          
+        const isAtRightSide = isAtSide && 
+          state.player.position.x < surface.maxX + 2 && 
+          state.player.position.x > surface.maxX - 1;
+        
+        // If player is at truck side and holding space, climb up
+        if ((isAtLeftSide || isAtRightSide) && state.keys['Space'] && !state.player.onGround) {
+          // Smooth climbing velocity
+          state.player.velocity.y = 7;
+          
+          // Smoothly pull player toward the truck side
+          if (isAtLeftSide) {
+            const targetX = surface.minX - 0.6;
+            state.player.position.x += (targetX - state.player.position.x) * 0.2;
+            state.player.velocity.x *= 0.7;
+          } else if (isAtRightSide) {
+            const targetX = surface.maxX + 0.6;
+            state.player.position.x += (targetX - state.player.position.x) * 0.2;
+            state.player.velocity.x *= 0.7;
+          }
+          
+          // Match truck's forward movement while climbing
+          state.player.position.z += truck.speed * state.speed * 0.8;
+        }
+      }
+
+      // Death conditions
+      if (state.player.position.y < -4.5 || Math.abs(state.player.position.x) > 50) {
+        state.gameOver = true;
+        setGameOver(true);
+      }
+
+      // Update trucks and check for collisions between them
+      state.trucks.forEach((truck, index) => {
+        truck.update(delta, state.speed);
+        
+        // Check collision with other trucks
+        for (let i = index + 1; i < state.trucks.length; i++) {
+          const otherTruck = state.trucks[i];
+          const distance = Math.abs(truck.mesh.position.z - otherTruck.mesh.position.z);
+          const lateralDistance = Math.abs(truck.mesh.position.x - otherTruck.mesh.position.x);
+          
+          // If trucks are too close and in same/adjacent lanes, adjust speed
+          if (distance < 15 && lateralDistance < 6) {
+            // Slow down the truck behind
+            if (truck.mesh.position.z > otherTruck.mesh.position.z) {
+              truck.mesh.position.z = otherTruck.mesh.position.z + 15;
+            } else {
+              otherTruck.mesh.position.z = truck.mesh.position.z + 15;
+            }
+          }
+        }
+      });
+
+      // Remove trucks that passed player
+      state.trucks = state.trucks.filter(truck => {
+        if (truck.mesh.position.z > state.player.position.z + 20) {
+          truck.destroy();
+          // Only award points if this truck is behind the player's furthest point reached AND game is not over
+          if (!state.gameOver && truck.mesh.position.z > state.highestZ + 15) {
+            state.score += 10;
+            setScore(state.score);
+          }
+          return false;
+        }
+        return true;
+      });
+
+      // Spawn new trucks when needed
+      const trucksAhead = state.trucks.filter(t => t.mesh.position.z < state.player.position.z - 20);
+      if (trucksAhead.length < 5) {
+        spawnTruck();
+      }
+
+      // Update scenery
+      sceneryObjects.forEach(obj => {
+        obj.mesh.position.z += state.speed * 0.3;
+      });
+      
+      // Remove and respawn scenery
+      for (let i = sceneryObjects.length - 1; i >= 0; i--) {
+        if (sceneryObjects[i].mesh.position.z > state.player.position.z + 50) {
+          scene.remove(sceneryObjects[i].mesh);
+          sceneryObjects.splice(i, 1);
+        }
+      }
+      
+      if (sceneryObjects.length < 30) {
+        state.scenerySpawnZ -= 20;
+        spawnScenery(state.scenerySpawnZ);
+      }
+
+      // Increase difficulty gradually
+      state.difficulty = 1 + state.score / 1000;
+      state.targetSpeed = 2.0 + state.difficulty * 0.5;
+
+      // Update player mesh
+      state.player.mesh.position.copy(state.player.position);
+
+      // Track forward progress
+      if (state.player.position.z < state.highestZ) {
+        state.highestZ = state.player.position.z;
+      }
+
+      // First person camera - always looking forward
+      camera.position.set(state.player.position.x, state.player.position.y + 0.6, state.player.position.z);
+      camera.lookAt(state.player.position.x, state.player.position.y + 0.6, state.player.position.z - 50);
+
+      renderer.render(scene, camera);
+    }
+
+    animate();
+
+    // Handle window resize
+    const handleResize = () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    };
+    window.addEventListener('resize', handleResize);
+
+    // Cleanup
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('resize', handleResize);
+      if (animationId) cancelAnimationFrame(animationId);
+      mountRef.current?.removeChild(renderer.domElement);
+      renderer.dispose();
+    };
+  }, []);
+
+  return (
+    <div style={{ width: '100vw', height: '100vh', overflow: 'hidden', position: 'relative' }}>
+      <div ref={mountRef} />
+      
+      {/* Crosshair */}
+      {isStarted && !gameOver && (
+        <div style={{
+          position: 'absolute',
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+          width: '4px',
+          height: '4px',
+          background: 'rgba(255,255,255,0.8)',
+          borderRadius: '50%',
+          border: '2px solid rgba(0,0,0,0.5)',
+          zIndex: 10,
+          pointerEvents: 'none'
+        }} />
+      )}
+      
+      {/* Score Counter */}
+      <div style={{
+        position: 'absolute',
+        top: 20,
+        left: '50%',
+        transform: 'translateX(-50%)',
+        color: 'white',
+        fontFamily: 'Arial, sans-serif',
+        fontSize: '48px',
+        fontWeight: 'bold',
+        textShadow: '4px 4px 8px rgba(0,0,0,0.9)',
+        zIndex: 10,
+        background: 'rgba(0,0,0,0.3)',
+        padding: '10px 30px',
+        borderRadius: '10px'
+      }}>
+        {score}
+      </div>
+
+      {!isStarted && !gameOver && (
+        <div style={{
+          position: 'absolute',
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+          color: 'white',
+          fontFamily: 'Arial, sans-serif',
+          textAlign: 'center',
+          background: 'rgba(0,0,0,0.8)',
+          padding: '40px 60px',
+          borderRadius: '15px',
+          zIndex: 10
+        }}>
+          <h1 style={{ margin: '0 0 30px 0', fontSize: '56px', color: '#ff6b35' }}>TRUCK JUMP</h1>
+          <div style={{ fontSize: '22px', margin: '15px 0', opacity: 0.9 }}>
+            <div style={{ marginBottom: '10px' }}>⬅️➡️ A/D - Move Left/Right</div>
+            <div style={{ marginBottom: '10px' }}>⬆️ SPACE - Jump</div>
+            <div style={{ marginBottom: '10px' }}>🧗 Hold SPACE at truck side - Climb</div>
+          </div>
+          <p style={{ fontSize: '28px', marginTop: '40px', color: '#ffd700', animation: 'pulse 1.5s infinite' }}>
+            Press SPACE to Start!
+          </p>
+        </div>
+      )}
+
+      {gameOver && (
+        <div style={{
+          position: 'absolute',
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+          color: 'white',
+          fontFamily: 'Arial, sans-serif',
+          textAlign: 'center',
+          background: 'rgba(0,0,0,0.9)',
+          padding: '50px 80px',
+          borderRadius: '15px',
+          zIndex: 10
+        }}>
+          <h1 style={{ margin: '0 0 30px 0', fontSize: '64px', color: '#ff4444' }}>GAME OVER</h1>
+          <p style={{ fontSize: '40px', margin: '25px 0', color: '#ffd700' }}>Score: {score}</p>
+          <p style={{ fontSize: '26px', marginTop: '40px', color: '#88ff88' }}>Press R to Restart</p>
+        </div>
+      )}
+
+      <style>{`
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.6; }
+        }
+      `}</style>
+    </div>
+  );
+};
+
+export default EndlessTruckGame;
